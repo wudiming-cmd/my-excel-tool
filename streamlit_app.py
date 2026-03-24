@@ -1,76 +1,62 @@
 import streamlit as st
 import pandas as pd
+import openpyxl
 from io import BytesIO
 
-st.set_page_config(page_title="表格自动填充工具", layout="wide")
+st.set_page_config(page_title="财务专用-保留公式版", layout="wide")
+st.title("📊 财务报表对应填充 (保留公式版)")
 
-st.title("🚀 表格数据对应填充工具")
-st.markdown("---")
+source_file = st.file_uploader("1. 上传【数据源表】(提取数据用)", type=['xlsx'])
+target_file = st.file_uploader("2. 上传【目标模板表】(带公式的表)", type=['xlsx'])
 
-# 1. 文件上传区
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("1. 上传【数据源表】")
-    st.info("这个表里有你想提取的信息（如：包含所有人的电话、地址）")
-    source_file = st.file_uploader("选择源 Excel", type=['xlsx'], key="source")
-
-with col2:
-    st.subheader("2. 上传【目标待填表】")
-    st.info("这个表是你现在要填写的空表")
-    target_file = st.file_uploader("选择目标 Excel", type=['xlsx'], key="target")
-
-# 2. 处理逻辑
 if source_file and target_file:
+    # 读取源表数据
     df_source = pd.read_excel(source_file)
-    df_target = pd.read_excel(target_file)
     
-    st.success("文件读取成功！")
-    st.markdown("---")
+    # 使用 openpyxl 加载目标表，保留公式
+    wb_target = openpyxl.load_workbook(target_file, data_only=False)
+    sheet = wb_target.active
     
-    # 3. 参数配置区
-    st.subheader("3. 配置对齐规则")
+    # 获取表头
+    target_headers = [cell.value for cell in sheet[1]]
     
-    c1, c2 = st.columns(2)
-    with c1:
-        source_key = st.selectbox("源表里的匹配列（如：身份证/姓名）", df_source.columns)
-    with c2:
-        target_key = st.selectbox("目标表里的匹配列（必须与左侧对应）", df_target.columns)
+    st.write("### 配置匹配规则")
+    col1, col2 = st.columns(2)
+    with col1:
+        s_key = st.selectbox("源表关联列（如：编号）", df_source.columns)
+    with col2:
+        t_key = st.selectbox("目标表关联列（必须在第一行）", target_headers)
     
-    selected_columns = st.multiselect("你想从【源表】提取哪些列填入【目标表】？", 
-                                     [c for c in df_source.columns if c != source_key])
+    # 找到关联列在目标表是第几列 (从1开始)
+    t_key_idx = target_headers.index(t_key) + 1
+    
+    # 选择要填充的列
+    cols_to_fill = st.multiselect("选择要从源表同步到目标表的列", 
+                                  [c for c in df_source.columns if c != s_key])
 
-    if st.button("开始合并数据"):
-        if not selected_columns:
-            st.warning("请至少选择一个要填充的列")
-        else:
-            # 核心对齐逻辑：左连接
-            # 只取源表中的 key 和 用户选中的列
-            df_to_merge = df_source[[source_key] + selected_columns]
+    if st.button("开始保留公式填充"):
+        # 将源表转为字典，方便快速查询
+        source_dict = df_source.set_index(s_key).to_dict('index')
+        
+        # 遍历目标表每一行 (从第2行开始)
+        fill_count = 0
+        for row_idx in range(2, sheet.max_row + 1):
+            key_value = sheet.cell(row=row_idx, column=t_key_idx).value
             
-            # 执行合并
-            result_df = pd.merge(df_target, df_to_merge, 
-                                 left_on=target_key, 
-                                 right_on=source_key, 
-                                 how='left')
-            
-            # 如果两个表的 key 列名不一样，合并后会多出一列，这里把它删掉
-            if source_key != target_key:
-                result_df = result_df.drop(columns=[source_key])
+            if key_value in source_dict:
+                # 找到匹配的数据了
+                match_data = source_dict[key_value]
+                for col_name in cols_to_fill:
+                    # 找到目标表对应的列号
+                    if col_name in target_headers:
+                        t_col_idx = target_headers.index(col_name) + 1
+                        # 填充值
+                        sheet.cell(row=row_idx, column=t_col_idx).value = match_data[col_name]
+                        fill_count += 1
 
-            st.write("### 预览合并后的结果 (前5行)：")
-            st.dataframe(result_df.head())
+        st.success(f"填充完成！共填入 {fill_count} 条数据，原有公式已保留。")
 
-            # 4. 下载区
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                result_df.to_excel(writer, index=False)
-            
-            st.download_button(
-                label="✅ 点击下载合并后的 Excel",
-                data=output.getvalue(),
-                file_name="合并结果.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-else:
-    st.warning("请先在上方上传两个 Excel 文件。")
+        # 导出文件
+        output = BytesIO()
+        wb_target.save(output)
+        st.download_button("📩 下载保留公式后的表格", output.getvalue(), "财务填充结果.xlsx")
